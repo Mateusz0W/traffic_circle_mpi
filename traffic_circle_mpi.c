@@ -220,11 +220,14 @@ int main(int argc, char *argv[])
     long iterations  = 500000;
     int  num_roads   = 4;   /* entrances == exits == num_roads */
     int  anim_mode   = 0;
+    int  fast_mode   = 0;
 
     if (argc >= 2) iterations = atol(argv[1]);
     if (argc >= 3) num_roads  = atoi(argv[2]);
-    for (int i = 1; i < argc; i++)
+    for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--anim") == 0) anim_mode = 1;
+        if (strcmp(argv[i], "--fast") == 0) fast_mode = 1;
+    }
 
     int num_ent   = num_roads;
     int num_exits = num_roads;
@@ -271,6 +274,12 @@ int main(int argc, char *argv[])
                 d[i][j] = 1.0 / num_roads;
     }
 
+    /* --fast: scale down inter-arrival times → ~43% more frequent arrivals.
+       Factor 0.7 keeps utilisation ~87%, well within stability margin. */
+    if (fast_mode)
+        for (int i = 0; i < num_roads; i++)
+            f[i] *= 0.7;
+
     /* Distribute iterations evenly; the last rank absorbs the remainder */
     long local_iter = iterations / nprocs;
     if (rank == nprocs - 1)
@@ -312,7 +321,7 @@ int main(int argc, char *argv[])
 
         printf("\n");
         printf("=============================================================\n");
-        printf("  Traffic Circle MPI Simulation\n");
+        printf("  Traffic Circle MPI Simulation%s\n", fast_mode ? "  [--fast]" : "");
         printf("  Processes    : %d\n", nprocs);
         printf("  Iterations   : %ld (per process: ~%ld)\n",
                iterations, iterations / nprocs);
