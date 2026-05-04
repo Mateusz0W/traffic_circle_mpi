@@ -7,6 +7,7 @@
 \usepackage[polish]{babel}
 \usepackage{tikz}
 \usepackage{amsmath}
+\usepackage{animate}
 \usetikzlibrary{arrows.meta, shapes.geometric, positioning}
 
 \title[Traffic Circle MPI]{Symulacja ronda metodą Monte Carlo z MPI}
@@ -170,11 +171,11 @@
 % ==================================================================
 \begin{frame}{Uruchomienie}
   \begin{block}{Kompilacja}
-    \texttt{mpicc -O2 -o traffic\_circle\_mpi traffic\_circle\_mpi\_fixed.c -lm}
+    \texttt{mpicc -O2 -o traffic\_circle\_mpi traffic\_circle\_mpi.c -lm}
   \end{block}
 
   \begin{block}{Uruchomienie}
-    \texttt{mpirun -np \textit{P} ./traffic\_circle\_mpi \textit{iteracje} \textit{R}}
+    \texttt{mpirun -np \textit{P} ./traffic\_circle\_mpi \textit{iteracje} \textit{R} [\texttt{--anim}]}
   \end{block}
 
   \bigskip
@@ -183,9 +184,10 @@
       \hline
       Parametr & Domyślnie & Opis \\
       \hline
-      \textit{P}         & —       & liczba procesów MPI \\
+      \textit{P}         & —        & liczba procesów MPI \\
       \textit{iteracje}  & 500\,000 & łączna liczba kroków symulacji \\
-      \textit{R}         & 4       & liczba wjazdów/wyjazdów (max 16) \\
+      \textit{R}         & 4        & liczba wjazdów/wyjazdów (max 16) \\
+      \texttt{--anim}    & wył.     & zapis stanu ronda do CSV (tylko $R=4$) \\
       \hline
     \end{tabular}
   \end{center}
@@ -195,6 +197,37 @@
   \begin{center}
     \texttt{mpirun -np 16 --hostfile nodes ./traffic\_circle\_mpi 1000000 4}
   \end{center}
+\end{frame}
+
+% ==================================================================
+% Aby ten slajd działał, przed kompilacją wyeksportuj klatki z GIFa:
+%   mkdir frames
+%   convert -coalesce traffic_animation.gif frames/frame%04d.png
+% Animacja działa w Adobe Acrobat; w innych przeglądarkach PDF widoczna
+% jest tylko pierwsza klatka.
+% ==================================================================
+\begin{frame}{Wizualizacja działania ronda ($R=4$)}
+  \begin{columns}
+    \begin{column}{0.62\textwidth}
+      \centering
+      \animategraphics[loop, autoplay, width=\textwidth]{15}{frames/frame}{0000}{0599}
+    \end{column}
+    \begin{column}{0.35\textwidth}
+      \small
+      \textbf{Kolory} = docelowy wyjazd auta:\\[0.4em]
+      {\color{red!70!black}$\blacksquare$} N \quad
+      {\color{blue!70!black}$\blacksquare$} W \quad
+      {\color{green!60!black}$\blacksquare$} S \quad
+      {\color{orange!80!black}$\blacksquare$} E \\[0.8em]
+      \textbf{Słupki} przy wjazdach\\= długość kolejki\\[0.8em]
+      Każda klatka = 1 iteracja\\
+      symulacji (stan ustalony).\\[0.8em]
+      Generowanie:\\[0.2em]
+      \texttt{\scriptsize mpirun -np 16 ./traffic}\\
+      \texttt{\scriptsize \ \ 500000 4 --anim}\\
+      \texttt{\scriptsize python3 animate\_traffic.py}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 % ==================================================================
