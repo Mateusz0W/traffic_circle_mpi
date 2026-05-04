@@ -61,10 +61,7 @@ mpiexec -f nodes -n 16 ./traffic_circle_mpi 500000 4 --anim
 # lub przez make:
 make anim NP=16
 
-# 2. skopiuj CSV lokalnie (jeśli pracujesz zdalnie)
-scp user@stud204-01:~/ścieżka/traffic_anim_data.csv .
-
-# 3. wygeneruj GIF (wymaga Python + matplotlib)
+# 2. wygeneruj GIF (wymaga Python + matplotlib)
 python3 animate_traffic.py
 # lub przez make:
 make animate
@@ -72,5 +69,3 @@ make animate
 # opcje skryptu
 python3 animate_traffic.py --input traffic_anim_data.csv --output rondo.gif --fps 20
 ```
-
-GIF otwórz w przeglądarce (Safari/Chrome) — Preview na Macu nie animuje GIFów.
