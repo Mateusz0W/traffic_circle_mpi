@@ -274,11 +274,14 @@ int main(int argc, char *argv[])
                 d[i][j] = 1.0 / num_roads;
     }
 
+
     /* --fast: scale down inter-arrival times to saturate the roundabout.
        Factor 0.45 pushes utilisation to ~136% → queues grow, circle fills up. */
     if (fast_mode)
         for (int i = 0; i < num_roads; i++)
             f[i] *= 0.45;
+
+
 
     /* Distribute iterations evenly; the last rank absorbs the remainder */
     long local_iter = iterations / nprocs;
