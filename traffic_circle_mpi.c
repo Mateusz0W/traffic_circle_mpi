@@ -1,5 +1,5 @@
 /*
- * traffic_circle_mpi_fixed.c
+ * traffic_circle_mpi.c
  *
  * Parallel Monte Carlo simulation of a traffic circle (roundabout)
  * as described in Section 10.5.6.
@@ -8,13 +8,13 @@
  * of iterations; results are then reduced (averaged) on rank 0.
  *
  * Compile:
- *   mpicc -O2 -o traffic_circle_mpi_fixed traffic_circle_mpi_fixed.c -lm
+ *   mpicc -O2 -o traffic_circle_mpi traffic_circle_mpi.c -lm
  *
  * Run (example – 4 processes, 1 000 000 iterations, 4 roads):
- *   mpirun -np 4 ./traffic_circle_mpi_fixed 1000000 4
+ *   mpirun -np 4 ./traffic_circle_mpi 1000000 4
  *
  * Usage:
- *   ./traffic_circle_mpi_fixed <iterations> <num_roads>
+ *   ./traffic_circle_mpi <iterations> <num_roads>
  *
  *   num_roads : number of roads; each road has exactly ONE entrance AND
  *               one exit on the circle  (default 4, max 16)
@@ -25,40 +25,6 @@
  *
  * The circle is divided into CIRCLE_SIZE = 4 * num_roads segments so
  * that every entrance/exit pair gets its own slot.
- *
- * -----------------------------------------------------------------------
- * FIXES vs. original traffic_circle_mpi.c:
- *
- *   FIX 1 – Phase 2 exit condition (critical):
- *     Original:  if (circle[i] == j)          (j = next slot = i+1)
- *     Fixed:     if (circle[i] == i)
- *     Reason: circle[i] stores the DESTINATION exit slot.  A car should
- *     leave the circle when it IS at its destination, i.e. when the
- *     current slot index equals the stored destination.  The original
- *     condition was true only when the exit slot happened to equal i+1,
- *     causing cars to exit one step early (at slot destination-1).
- *
- *   FIX 2 – Phase 3 lost arrivals (critical):
- *     When the entrance slot is free but the queue is non-empty, the
- *     original code used "else if (arrival[i])", silently dropping any
- *     new arrival that coincided with a queue-drain step.  The arrival
- *     was counted in arrival_cnt but never queued, corrupting P(wait)
- *     and avg_queue.  Fixed: after dequeuing one car, check arrival[i]
- *     and push it onto the queue.
- *
- *   FIX 3 – Weighted MPI average (moderate):
- *     The last MPI rank ran (iterations % nprocs) extra iterations but
- *     was weighted equally to all others when dividing by nprocs.
- *     Fixed: each process scales its local results by local_iter before
- *     MPI_Reduce(SUM), and rank 0 divides by the total iteration count.
- *
- *   FIX 4 – Unused parameter num_ent in choose_exit (minor):
- *     Removed the unused num_ent parameter from choose_exit.
- *
- *   FIX 5 – Guard against local_iter == 0 (minor):
- *     Added a check that iterations >= nprocs to avoid division by zero
- *     (avg_queue = 0/0 = NaN) when iterations < nprocs.
- * -----------------------------------------------------------------------
  */
 
 #include <stdio.h>
@@ -68,10 +34,8 @@
 #include <time.h>
 #include <mpi.h>
 
-/* ------------------------------------------------------------------ */
-/* Constants                                                            */
-/* ------------------------------------------------------------------ */
-#define MAX_ENT   16   /* hard upper bound on entrances / exits */
+/* Hard upper bound on the number of entrances / exits */
+#define MAX_ENT   16
 
 /* ------------------------------------------------------------------ */
 /* Simple LCG random-number generator (per-process seed)               */
@@ -80,7 +44,7 @@ static unsigned long long rng_state;
 
 static void rng_seed(unsigned long long s) { rng_state = s; }
 
-/* Returns uniform in (0,1) */
+/* Returns a uniform sample in (0,1) */
 static double rng_uniform(void)
 {
     rng_state = rng_state * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -88,7 +52,7 @@ static double rng_uniform(void)
     return (hi + 0.5) / 4294967296.0;
 }
 
-/* Returns exponential random variable with mean `mean` */
+/* Returns an exponential random variable with mean `mean` */
 static double rng_exp(double mean)
 {
     double u;
@@ -98,9 +62,8 @@ static double rng_exp(double mean)
 
 /* ------------------------------------------------------------------ */
 /* Choose exit for a car entering at entrance `ent`                     */
-/* Returns the circle index of the chosen exit                          */
+/* Returns the circle index of the chosen exit slot                     */
 /* ------------------------------------------------------------------ */
-/* FIX 4: removed unused parameter num_ent */
 static int choose_exit(int ent,
                        int    num_exits,
                        double d[MAX_ENT][MAX_ENT],
@@ -122,43 +85,42 @@ static void simulate(long iterations,
                      int  num_ent,
                      int  num_exits,
                      int  circle_size,
-                     double f[],            /* mean inter-arrival time */
+                     double f[],            /* mean inter-arrival time per entrance */
                      double d[][MAX_ENT],   /* exit probability matrix */
                      int  ent_offset[],     /* circle index of entrance i */
-                     int  exit_offset[],    /* circle index of exit j     */
+                     int  exit_offset[],    /* circle index of exit j */
                      /* outputs */
                      double wait_prob[],    /* P(wait) per entrance */
                      double avg_queue[])    /* avg queue length per entrance */
 {
-    /* Allocate circle buffers */
+    /* Circle state: circle[i] holds the destination exit slot of the car
+       occupying slot i, or -1 if the slot is empty */
     int *circle     = calloc(circle_size, sizeof(int));
     int *new_circle = calloc(circle_size, sizeof(int));
 
-    /* Per-entrance statistics */
-    long *arrival_cnt = calloc(num_ent, sizeof(long));
-    long *wait_cnt    = calloc(num_ent, sizeof(long));
-    long *queue       = calloc(num_ent, sizeof(long));
+    long   *arrival_cnt = calloc(num_ent, sizeof(long));
+    long   *wait_cnt    = calloc(num_ent, sizeof(long));
+    long   *queue       = calloc(num_ent, sizeof(long));
     double *queue_accum = calloc(num_ent, sizeof(double));
 
-    /* Time until next arrival (continuous-time interleaved with discrete steps) */
+    /* Time remaining until next arrival at each entrance */
     double *next_arrival = malloc(num_ent * sizeof(double));
 
-    /* Initialise circle to empty (-1) */
     for (int i = 0; i < circle_size; i++) circle[i] = -1;
 
-    /* Initialise next-arrival times */
     for (int i = 0; i < num_ent; i++)
         next_arrival[i] = rng_exp(f[i]);
 
+    /* Binary flag: did a car arrive at entrance i this iteration? */
     int *arrival = calloc(num_ent, sizeof(int));
 
-    /* ----- warm-up: skip first 10% of iterations ----- */
+    /* Discard the first 10% of iterations to reach steady state */
     long warmup = iterations / 10;
     long total  = iterations + warmup;
 
     for (long iter = 0; iter < total; iter++) {
 
-        /* Phase 1: new cars arrive */
+        /* Phase 1: advance arrival clocks; record arrivals */
         for (int i = 0; i < num_ent; i++) {
             arrival[i] = 0;
             next_arrival[i] -= 1.0;
@@ -169,44 +131,42 @@ static void simulate(long iterations,
             }
         }
 
-        /* Phase 2: cars inside circle advance simultaneously */
+        /* Phase 2: all cars on the circle advance one slot simultaneously.
+           A car exits when it reaches its destination slot (circle[i] == i). */
         for (int i = 0; i < circle_size; i++) new_circle[i] = -1;
 
         for (int i = 0; i < circle_size; i++) {
             if (circle[i] == -1) continue;
             int j = (i + 1) % circle_size;
-            /* FIX 1: exit when the car IS at its destination slot (circle[i]==i),
-               not when the destination equals the *next* slot (circle[i]==j).
-               Original: if (circle[i] == j) */
             if (circle[i] == i) {
                 /* Car has reached its exit – leaves the circle */
-                /* new_circle[j] already initialised to -1 above */
             } else {
                 new_circle[j] = circle[i];
             }
         }
         memcpy(circle, new_circle, circle_size * sizeof(int));
 
-        /* Phase 3: cars enter circle */
+        /* Phase 3: admit cars from entrance queues into free slots */
         for (int i = 0; i < num_ent; i++) {
             int slot = ent_offset[i];
             if (circle[slot] == -1) {
-                /* Slot is free */
+                /* Entrance slot is free */
                 if (queue[i] > 0) {
-                    /* Dequeue the first waiting car */
+                    /* Dequeue the first waiting car and place it on the circle */
                     queue[i]--;
                     circle[slot] = choose_exit(i, num_exits, d, exit_offset);
-                    /* FIX 2: new arrival joins queue – slot is now occupied again.
-                       Original code used "else if", silently dropping this arrival. */
+                    /* A new arrival in the same step must still wait,
+                       because the slot is now taken by the dequeued car */
                     if (arrival[i]) {
                         if (iter >= warmup) wait_cnt[i]++;
                         queue[i]++;
                     }
                 } else if (arrival[i]) {
+                    /* No queue and slot is free – car enters immediately */
                     circle[slot] = choose_exit(i, num_exits, d, exit_offset);
                 }
             } else {
-                /* Slot is occupied – new arrivals must queue */
+                /* Entrance slot is occupied – arriving cars must queue */
                 if (arrival[i]) {
                     if (iter >= warmup) wait_cnt[i]++;
                     queue[i]++;
@@ -214,14 +174,14 @@ static void simulate(long iterations,
             }
         }
 
-        /* Accumulate queue lengths (after warm-up) */
+        /* Accumulate queue lengths after warm-up */
         if (iter >= warmup) {
             for (int i = 0; i < num_ent; i++)
                 queue_accum[i] += (double)queue[i];
         }
     }
 
-    /* Compute statistics */
+    /* Compute per-entrance statistics */
     for (int i = 0; i < num_ent; i++) {
         wait_prob[i]  = (arrival_cnt[i] > 0)
                         ? (double)wait_cnt[i] / (double)arrival_cnt[i]
@@ -244,7 +204,6 @@ int main(int argc, char *argv[])
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
-    /* ---- Parse arguments ---- */
     long iterations  = 500000;
     int  num_roads   = 4;   /* entrances == exits == num_roads */
 
@@ -252,32 +211,27 @@ int main(int argc, char *argv[])
     if (argc >= 3) num_roads  = atoi(argv[2]);
 
     int num_ent   = num_roads;
-    int num_exits = num_roads;   /* always equal */
+    int num_exits = num_roads;
 
     if (num_roads  < 1 || num_roads  > MAX_ENT) { if (!rank) fprintf(stderr, "num_roads must be 1-%d\n", MAX_ENT); MPI_Finalize(); return 1; }
     if (iterations < 1)                          { if (!rank) fprintf(stderr, "iterations must be > 0\n");          MPI_Finalize(); return 1; }
-    /* FIX 5: guard against local_iter == 0 which causes NaN in avg_queue */
     if (iterations < nprocs)                     { if (!rank) fprintf(stderr, "iterations must be >= num_processes (%d)\n", nprocs); MPI_Finalize(); return 1; }
 
-    /* ---- Build circle geometry ---- */
-    /* Each road shares the same slot for its entrance and exit,
-       exactly as in the textbook (N=0, W=4, S=8, E=12 for 4 roads). */
+    /* Each road occupies every 4th slot: road i → slot i*4.
+       Entrance and exit share the same slot (textbook layout). */
     int circle_size = 4 * num_roads;
 
     int ent_offset[MAX_ENT];
     int exit_offset[MAX_ENT];
 
-    /* Entrance i and exit i occupy the same circle slot (road i). */
     for (int i = 0; i < num_roads; i++)
         ent_offset[i] = exit_offset[i] = i * 4;
 
-    /* ---- Traffic parameters ---- */
-    double f[MAX_ENT];     /* mean inter-arrival time */
-    double d[MAX_ENT][MAX_ENT]; /* exit probability matrix */
+    double f[MAX_ENT];
+    double d[MAX_ENT][MAX_ENT];
 
     if (num_roads == 4) {
-        /* ---- Textbook parameters (Figure 10.21) ---- */
-        /* N=0, W=1, S=2, E=3 */
+        /* Textbook parameters (Figure 10.21): N=0, W=1, S=2, E=3 */
         double f4[4] = {3.0, 3.0, 4.0, 2.0};
         double d4[4][4] = {
             {0.1, 0.2, 0.5, 0.2},   /* N */
@@ -290,30 +244,26 @@ int main(int argc, char *argv[])
             for (int j = 0; j < 4; j++) d[i][j] = d4[i][j];
         }
     } else {
-        /* ---- Generic symmetric parameters ---- */
-        /* Mean inter-arrival scales with num_roads to keep the system stable.
-           Stability requires f_avg > (R-1)/2 (Little's law).
-           Using f = R-1 / R (even/odd) satisfies this for any R and matches
-           the textbook values exactly when R=4 (gives 3/4). */
+        /* Generic symmetric parameters scaled to keep the system stable.
+           Stability requires f_avg > (R-1)/2; alternating R-1/R satisfies
+           this for any R and matches textbook values exactly when R=4. */
         for (int i = 0; i < num_roads; i++)
             f[i] = (i % 2 == 0) ? (double)(num_roads - 1) : (double)num_roads;
 
-        /* Uniform exit probabilities */
         for (int i = 0; i < num_roads; i++)
             for (int j = 0; j < num_roads; j++)
                 d[i][j] = 1.0 / num_roads;
     }
 
-    /* ---- Per-process share of iterations ---- */
+    /* Distribute iterations evenly; the last rank absorbs the remainder */
     long local_iter = iterations / nprocs;
     if (rank == nprocs - 1)
-        local_iter += iterations % nprocs;   /* remainder to last rank */
+        local_iter += iterations % nprocs;
 
-    /* Seed each process differently */
+    /* Each process gets a unique, time-varied seed */
     rng_seed((unsigned long long)(rank + 1) * 1234567891ULL
              ^ (unsigned long long)time(NULL));
 
-    /* ---- Run local simulation ---- */
     double local_wait_prob[MAX_ENT] = {0};
     double local_avg_queue[MAX_ENT] = {0};
 
@@ -321,16 +271,13 @@ int main(int argc, char *argv[])
              f, d, ent_offset, exit_offset,
              local_wait_prob, local_avg_queue);
 
-    /* FIX 3: weight each process's result by its iteration count before
-       reducing.  Dividing the SUM by total iterations gives the correct
-       weighted mean even when the last rank ran extra iterations.
-       Original code summed unweighted values and divided by nprocs. */
+    /* Weight each process's result by its iteration count so that the
+       MPI_Reduce SUM divided by total iterations gives the correct mean */
     for (int i = 0; i < num_roads; i++) {
         local_wait_prob[i] *= (double)local_iter;
         local_avg_queue[i] *= (double)local_iter;
     }
 
-    /* ---- Reduce results to rank 0 ---- */
     double global_wait_prob[MAX_ENT] = {0};
     double global_avg_queue[MAX_ENT] = {0};
 
@@ -339,11 +286,10 @@ int main(int argc, char *argv[])
     MPI_Reduce(local_avg_queue, global_avg_queue, num_roads,
                MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    /* ---- Print results ---- */
     if (rank == 0) {
         for (int i = 0; i < num_roads; i++) {
-            global_wait_prob[i] /= (double)iterations;  /* FIX 3 */
-            global_avg_queue[i] /= (double)iterations;  /* FIX 3 */
+            global_wait_prob[i] /= (double)iterations;
+            global_avg_queue[i] /= (double)iterations;
         }
 
         const char *label4[4] = {"N", "W", "S", "E"};
