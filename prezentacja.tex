@@ -1,0 +1,206 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[polish]{babel}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta, shapes.geometric, positioning}
+
+\title[Traffic Circle MPI]{Symulacja ronda metodą Monte Carlo z MPI}
+\author{Systemy Równoległe}
+\date{\today}
+
+% ==================================================================
+\begin{document}
+% ==================================================================
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+% ==================================================================
+\begin{frame}{Problem}
+  \begin{columns}
+    \begin{column}{0.52\textwidth}
+      Rondo z $R$ wjazdami i $R$ wyjazdami.\\[0.4em]
+      Pytania (podręcznik, rozdz. 10.5.6):
+      \begin{enumerate}
+        \item[(a)] $P(\text{czekanie})$ — prawdopodobieństwo, że auto trafi do kolejki
+        \item[(b)] $\overline{q}$ — średnia długość kolejki przy wjeździe
+      \end{enumerate}
+      \bigskip
+      Metoda: \textbf{dyskretna symulacja Monte Carlo}\\
+      z równoległym uruchamianiem replik przez MPI.
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \begin{tikzpicture}[scale=0.9]
+        \draw[thick, gray!50, fill=gray!10] (0,0) circle (1.8cm);
+        \draw[thick, white, fill=white] (0,0) circle (0.7cm);
+        % TikZ uzywa stopni bezposrednio
+        \foreach \angle/\lbl/\col in {90/N/blue, 0/E/orange, 270/S/red, 180/W/teal}{
+          % droga: linia od zewnatrz do krawedzi kola
+          \draw[\col, very thick] (\angle:1.85) -- (\angle:2.5);
+          % strzalka wjazdu (do srodka)
+          \draw[\col, -latex, thick] (\angle:2.5) -- (\angle:2.0);
+          % etykieta
+          \node[\col!80!black, font=\bfseries] at (\angle:3.0) {\lbl};
+        }
+        \draw[-latex, gray, thick] (55:1.3) arc[start angle=55, end angle=15, radius=1.3cm];
+        \node[font=\tiny, gray] at (0,0) {$4R$ slotów};
+      \end{tikzpicture}
+
+      \centering\small Rondo dla $R=4$ (16 slotów)
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ==================================================================
+\begin{frame}{Model symulacji}
+  Rondo podzielone na $4R$ slotów. Wjazd i wyjazd drogi $i$ — ten sam slot $i \cdot 4$.\\[0.6em]
+
+  \textbf{Każda iteracja — 3 fazy:}
+  \begin{enumerate}
+    \item \textbf{Przyjazdy} — dla każdego wjazdu $i$: odlicz czas; jeśli minął → nowe auto (czas z $\mathrm{Exp}(f_i)$)
+    \item \textbf{Ruch na rondzie} — wszystkie auta przesuwają się o 1 slot; auto na swoim slocie docelowym opuszcza rondo
+    \item \textbf{Wjazd na rondo} — slot wolny: wjeżdża auto z kolejki lub nowe; slot zajęty: nowe auto czeka w kolejce
+  \end{enumerate}
+
+  \bigskip
+  \textbf{Rozgrzewka:} pierwsze 10\% iteracji odrzucane — ustala się stan ustalony.\\[0.3em]
+  \textbf{Parametry} ($R=4$): $f = [3, 3, 4, 2]$, macierz $D[4][4]$ z rys. 10.21.
+\end{frame}
+
+% ==================================================================
+\begin{frame}{Paralelizacja — replikacja Monte Carlo}
+  \begin{columns}
+    \begin{column}{0.55\textwidth}
+      Każdy proces MPI uruchamia \textbf{niezależną kopię} całej symulacji.
+
+      \bigskip
+      \begin{itemize}
+        \item Iteracje dzielone równomiernie: $\ell_k = \lfloor N/P \rfloor$
+        \item Niezależny generator LCG na każdy rank\\
+              \texttt{seed = (rank+1) * C \^{} time(NULL)}
+        \item Wyniki agregowane: \texttt{MPI\_Reduce(SUM)}
+        \item Rank 0 oblicza i wyświetla średnie ważone
+      \end{itemize}
+
+      \bigskip
+      Złożoność komunikacji: $O(R)$ liczb — minimalna.
+    \end{column}
+    \begin{column}{0.4\textwidth}
+      \begin{tikzpicture}[node distance=0.45cm, font=\small]
+        \node[draw, rounded corners, fill=blue!15, minimum width=3.2cm, minimum height=0.55cm] (r0) {rank 0 \ \ $\ell_0$ iteracji};
+        \node[draw, rounded corners, fill=blue!15, minimum width=3.2cm, minimum height=0.55cm, below=of r0] (r1) {rank 1 \ \ $\ell_1$ iteracji};
+        \node[below=0.05cm of r1, font=\small] {$\vdots$};
+        \node[draw, rounded corners, fill=blue!15, minimum width=3.2cm, minimum height=0.55cm, below=0.65cm of r1] (rn) {rank $P{-}1$ \ $\ell_{P-1}$ iteracji};
+        \node[draw, rounded corners, fill=orange!30, minimum width=3.2cm, minimum height=0.6cm, below=0.5cm of rn] (red) {MPI\_Reduce(SUM)};
+        \node[draw, rounded corners, fill=green!20, minimum width=3.2cm, minimum height=0.55cm, below=0.4cm of red] (out) {rank 0: wyniki / $N$};
+        \draw[-latex] (r0.south) -- ++(0,-0.12) -| (red.north);
+        \draw[-latex] (r1.south) -- ++(0,-0.12) -| (red.north);
+        \draw[-latex] (rn.south) -- (red.north);
+        \draw[-latex] (red.south) -- (out.north);
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ==================================================================
+\begin{frame}{$P$ (procesy MPI) i $R$ (wjazdy) — niezależne parametry}
+  \begin{columns}
+    \begin{column}{0.50\textwidth}
+      \textbf{Geometria ronda:}
+      \[
+        \text{sloty} = 4 \times R
+      \]
+      Liczba slotów jest \textbf{zawsze} 4-krotnością liczby wjazdów.\\
+      Wynika to z odstępu między drogami w modelu.
+
+      \bigskip
+      \textbf{$P$ i $R$ są od siebie niezależne:}
+      \begin{itemize}
+        \item $R$ określa \textbf{model} — ile dróg ma rondo
+        \item $P$ określa \textbf{zasoby} — ile węzłów klastra użyć
+        \item Każda kombinacja $(P, R)$ jest poprawna
+      \end{itemize}
+
+      \bigskip
+      Każdy z $P$ procesów symuluje \textbf{to samo rondo} ($R$ wjazdów)\\
+      przez $N/P$ iteracji — więcej węzłów = więcej próbek = \\
+      mniejsza wariancja wyników.
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \begin{center}
+      \begin{tabular}{cccc}
+        \hline
+        $R$ & sloty ($4R$) & przykładowe $P$ \\
+        \hline
+        4  & 16 & 1, 2, 4, 8, 16, \ldots \\
+        8  & 32 & 1, 2, 4, 8, 16, \ldots \\
+        16 & 64 & 1, 2, 4, \ldots, 64 \\
+        \hline
+      \end{tabular}
+      \end{center}
+
+      \bigskip
+      \begin{tikzpicture}[scale=0.82]
+        \draw[-latex] (0,0) -- (5.0,0) node[right, font=\small] {$R$};
+        \draw[-latex] (0,0) -- (0,4.6) node[above, font=\small] {$P$};
+        \foreach \x in {1,2,3,4}{
+          \draw[gray!25] (\x,0) -- (\x,4.3);
+          \draw[gray!25] (0,\x) -- (4.8,\x);
+          \draw (\x,.05) -- (\x,-.05) node[below,font=\scriptsize] {\x};
+          \draw (.05,\x) -- (-.05,\x) node[left, font=\scriptsize] {\x};
+        }
+        % P = k*R lines
+        \draw[blue!60,  thick] (0,0) -- (4.3,4.3) node[right,font=\scriptsize,blue!60]  {$P{=}R$};
+        \draw[teal!70,  thick] (0,0) -- (2.15,4.3) node[above,font=\scriptsize,teal!70] {$P{=}2R$};
+        \draw[red!60,   thick] (0,0) -- (1.075,4.3) node[above,font=\scriptsize,red!60] {$P{=}4R$};
+        % area — dowolne P
+        \fill[yellow!20, opacity=0.5] (0,0) -- (4.8,0) -- (4.8,4.3) -- (0,4.3) -- cycle;
+        \node[font=\scriptsize, gray] at (3.0,2.0) {dowolne $P$};
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% ==================================================================
+\begin{frame}{Uruchomienie}
+  \begin{block}{Kompilacja}
+    \texttt{mpicc -O2 -o traffic\_circle\_mpi traffic\_circle\_mpi\_fixed.c -lm}
+  \end{block}
+
+  \begin{block}{Uruchomienie}
+    \texttt{mpirun -np \textit{P} ./traffic\_circle\_mpi \textit{iteracje} \textit{R}}
+  \end{block}
+
+  \bigskip
+  \begin{center}
+    \begin{tabular}{lll}
+      \hline
+      Parametr & Domyślnie & Opis \\
+      \hline
+      \textit{P}         & —       & liczba procesów MPI \\
+      \textit{iteracje}  & 500\,000 & łączna liczba kroków symulacji \\
+      \textit{R}         & 4       & liczba wjazdów/wyjazdów (max 16) \\
+      \hline
+    \end{tabular}
+  \end{center}
+
+  \bigskip
+  \textbf{Przykład} (16 węzłów klastra, 1M iteracji, 4 drogi):
+  \begin{center}
+    \texttt{mpirun -np 16 --hostfile nodes ./traffic\_circle\_mpi 1000000 4}
+  \end{center}
+\end{frame}
+
+% ==================================================================
+\begin{frame}{}
+  \centering
+  \Huge Dziękuję za uwagę
+\end{frame}
+
+\end{document}
