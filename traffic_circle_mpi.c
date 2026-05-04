@@ -80,6 +80,8 @@ static int choose_exit(int ent,
 
 /* ------------------------------------------------------------------ */
 /* Single-process simulation                                            */
+/* rec_fp != NULL  →  write circle state + queue to CSV every          */
+/* rec_every iterations (post warm-up); used for --anim mode only.     */
 /* ------------------------------------------------------------------ */
 static void simulate(long iterations,
                      int  num_ent,
@@ -91,7 +93,9 @@ static void simulate(long iterations,
                      int  exit_offset[],    /* circle index of exit j */
                      /* outputs */
                      double wait_prob[],    /* P(wait) per entrance */
-                     double avg_queue[])    /* avg queue length per entrance */
+                     double avg_queue[],    /* avg queue length per entrance */
+                     FILE  *rec_fp,         /* NULL = no recording */
+                     int    rec_every)      /* record every N post-warmup iterations */
 {
     /* Circle state: circle[i] holds the destination exit slot of the car
        occupying slot i, or -1 if the slot is empty */
@@ -178,6 +182,15 @@ static void simulate(long iterations,
         if (iter >= warmup) {
             for (int i = 0; i < num_ent; i++)
                 queue_accum[i] += (double)queue[i];
+
+            /* Optional per-frame CSV recording for animation */
+            long post = iter - warmup;
+            if (rec_fp && post % rec_every == 0) {
+                fprintf(rec_fp, "%ld", post);
+                for (int i = 0; i < circle_size; i++) fprintf(rec_fp, ",%d", circle[i]);
+                for (int i = 0; i < num_ent;     i++) fprintf(rec_fp, ",%ld", queue[i]);
+                fprintf(rec_fp, "\n");
+            }
         }
     }
 
@@ -206,9 +219,12 @@ int main(int argc, char *argv[])
 
     long iterations  = 500000;
     int  num_roads   = 4;   /* entrances == exits == num_roads */
+    int  anim_mode   = 0;
 
     if (argc >= 2) iterations = atol(argv[1]);
     if (argc >= 3) num_roads  = atoi(argv[2]);
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], "--anim") == 0) anim_mode = 1;
 
     int num_ent   = num_roads;
     int num_exits = num_roads;
@@ -269,7 +285,7 @@ int main(int argc, char *argv[])
 
     simulate(local_iter, num_ent, num_exits, circle_size,
              f, d, ent_offset, exit_offset,
-             local_wait_prob, local_avg_queue);
+             local_wait_prob, local_avg_queue, NULL, 0);
 
     /* Weight each process's result by its iteration count so that the
        MPI_Reduce SUM divided by total iterations gives the correct mean */
@@ -325,6 +341,37 @@ int main(int argc, char *argv[])
         printf("Answer to question (a) – steady-state P(wait) shown in column 3.\n");
         printf("Answer to question (b) – steady-state avg queue shown in column 4.\n");
         printf("\n");
+
+        /* --anim: run a short single-process simulation and record every
+           iteration to traffic_anim_data.csv for use with animate_traffic.py */
+        if (anim_mode && num_roads == 4) {
+            const char *csv_path = "traffic_anim_data.csv";
+            FILE *fp = fopen(csv_path, "w");
+            if (!fp) {
+                fprintf(stderr, "Cannot open %s for writing\n", csv_path);
+            } else {
+                /* Write CSV header: iter, s0..s15, q0..q3 */
+                fprintf(fp, "iter");
+                for (int i = 0; i < circle_size; i++) fprintf(fp, ",s%d", i);
+                for (int i = 0; i < num_roads;   i++) fprintf(fp, ",q%d", i);
+                fprintf(fp, "\n");
+
+                /* Fresh seed so the animation run is reproducible */
+                rng_seed(42ULL);
+
+                double rec_wait[MAX_ENT] = {0};
+                double rec_queue[MAX_ENT] = {0};
+
+                /* 600 post-warmup iterations recorded every step = 600 frames */
+                simulate(600, num_ent, num_exits, circle_size,
+                         f, d, ent_offset, exit_offset,
+                         rec_wait, rec_queue, fp, 1);
+
+                fclose(fp);
+                printf("Animation data written to %s\n", csv_path);
+                printf("Generate animation:  python3 animate_traffic.py\n\n");
+            }
+        }
     }
 
     MPI_Finalize();
